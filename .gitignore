@@ -1,0 +1,9 @@
+data
+.ipynb_checkpoints/
+__pycache__/
+.idea/
+*.mp4
+.DS_Store
+*.pdf
+*.png
+**/.vscode/
