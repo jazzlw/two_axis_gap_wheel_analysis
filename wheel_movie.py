@@ -2,6 +2,7 @@ import glob
 import os
 import sys
 import time
+from multiprocessing import Pool
 from pathlib import Path
 
 import cv2
@@ -43,12 +44,17 @@ class MakeMovie(object):
 
     """
 
-    def __init__(self, output_path, output_filename, n_chunks=4, n_jobs=4):
+    def __init__(
+        self, output_path, output_filename, n_chunks=4, n_jobs=4, delete_chunks=True
+    ):
         self.output_path = Path(output_path)
+        if not self.output_path.exists():
+            self.output_path.mkdir(parents=True)
         self.output_filename = output_filename
 
         self.n_chunks = n_chunks
         self.n_jobs = n_jobs
+        self.delete_chunks = delete_chunks
 
         # these vars need to be set by Child class
         self.fig = None
@@ -61,10 +67,24 @@ class MakeMovie(object):
         t0 = time.time()
         # variable names are confusing, change
         frames_chunks = np.array_split(self.frames, self.n_chunks)
-        Parallel(n_jobs=self.n_jobs, verbose=0, backend="loky")(
-            delayed(self.make_chunk)(chunk, frames)
-            for chunk, frames in enumerate(frames_chunks)
-        )
+        # make_chunk = partial(
+        #     self.make_chunk,
+        #     )
+        results = []
+        with Pool(self.n_jobs) as p:
+            # with tqdm(total=len(frames_chunks)) as pbar:
+            for result in p.starmap(
+                self.make_chunk,
+                tqdm(enumerate(frames_chunks), total=len(frames_chunks)),
+                chunksize=1,
+            ):
+                results.append(result)
+                # pbar.update()
+
+        # Parallel(n_jobs=self.n_jobs, verbose=0, backend="loky")(
+        #     delayed(self.make_chunk)(chunk, frames)
+        #     for chunk, frames in enumerate(frames_chunks)
+        # )
 
         self.stitch_chunks()
         t1 = time.time()
@@ -83,8 +103,8 @@ class MakeMovie(object):
 
     def make_chunk(self, chunk, frames):
         # progress bar printed in terminal, not working as expected
-        text = "chunk " + str(chunk + 1)
-        self.pbar = tqdm(total=len(frames), position=chunk + 1, desc=text)
+        # text = f"chunk { chunk + 1:05}"
+        # self.pbar = tqdm(total=len(frames), position=chunk + 1, desc=text)
 
         # should check if self.fig,fps, animate_func and init_func are defined (they are all None by default)
 
@@ -104,14 +124,17 @@ class MakeMovie(object):
         )
 
         ani.save(
-            self.output_path / (self.output_filename + "_chunk_" + str(chunk) + ".mp4"),
+            self.output_path
+            / (self.output_filename + f"_chunk_{chunk + 1:05}" + ".mp4"),
             writer=writer,
         )
-        self.pbar.close()
+        # self.pbar.close()
 
     def stitch_chunks(self):
         # stitches all *.mp4 files with word chunk in output_path and saves with output_filename
+        current_path = os.getcwd()
         os.chdir(self.output_path)
+
         # creates list of files to stitch
         text_file = open("list.txt", "w")
         files_to_stitch = sorted(glob.glob("*chunk*.mp4"))
@@ -125,9 +148,11 @@ class MakeMovie(object):
             + ".mp4"
         )
         # deletes chunked files and temporary list.txt
-        for file in files_to_stitch:
-            os.remove(file)
-        os.remove("list.txt")
+        if self.delete_chunks:
+            for file in files_to_stitch:
+                os.remove(file)
+            os.remove("list.txt")
+        os.chdir(current_path)
 
     def setup_figure(self):
         pass
@@ -149,19 +174,21 @@ class WheelMovie(MakeMovie):
         plot_width,
         output_path,
         output_filename,
+        fps=30,
         start_time=None,
         total_frames=None,
         zero_pos_frac=0.5,
-        make_movie_kws={},
-        skip_nth_frame=1,
+        show_nth_frame=1,
         pos_ax_size=10,
+        **kwargs,
     ):
-        MakeMovie.__init__(self, output_path, output_filename, **make_movie_kws)
+        MakeMovie.__init__(self, output_path, output_filename, **kwargs)
 
         self.plot_width = pd.Timedelta(plot_width)
         self.pos_ax_size = pos_ax_size / 2
         self.zero_pos_frac = zero_pos_frac
         self.fig = plt.figure(constrained_layout=False, figsize=(15, 10), dpi=140)
+        self.fps = fps
 
         # load wheel data
         wheel_df = pd.read_csv(wheel_data_file)
@@ -183,7 +210,8 @@ class WheelMovie(MakeMovie):
         self.wheel_df = wheel_df
 
         # load movie and timestamps
-        self.wheel_movie = cv2.VideoCapture(str(movie_file))
+        self.movie_file = movie_file
+        self.wheel_movie = None
         movie_timestamps = pd.read_csv(movie_timestamp_file)
         movie_timestamps.columns = movie_timestamps.columns.str.strip().str.replace(
             " ", "_"
@@ -201,7 +229,7 @@ class WheelMovie(MakeMovie):
             self.start_time = self.movie_timestamps.index[0]
         # self.movie_timestamps = movie_timestamps[:::skip_nth_frame]
 
-        self.frames = movie_timestamps.index[::skip_nth_frame]
+        self.frames = movie_timestamps.index[::show_nth_frame]
         if total_frames is not None:
             self.frames = self.frames[:total_frames]
 
@@ -219,7 +247,7 @@ class WheelMovie(MakeMovie):
         )
         timeseries_bottoms = timeseries_tops + timeseries_height
 
-        self.image_ax = self.fig.add_subplot(gs[0 : timeseries_tops[0], :])
+        self.image_ax = self.fig.add_subplot(gs[0 : timeseries_tops[-1] - 10, :])
         self.image_ax.set_xticks([])
         self.image_ax.set_yticks([])
         self.image_ax.set_title(fly_name)
@@ -259,26 +287,33 @@ class WheelMovie(MakeMovie):
             ax.set_ylabel(f"{var} (rad)")
             ax.yaxis.set_major_locator(plt.MultipleLocator(np.pi))
             ax.yaxis.set_major_formatter(plt.FuncFormatter(ax_format_func))
-
+            despine(ax)
         # self.fig.suptitle(self.time.strftime("%b %d %H:%M:%S"), size="xx-large")
-        self.animate_func(self.start_time)
+        # self.animate_func(self.start_time)
 
     def animate_func(self, start_time):
+        if self.wheel_movie is None:
+            self.wheel_movie = cv2.VideoCapture(str(self.movie_file))
         self.start_time = start_time
         wheel_chunk = self.wheel_df.loc[
             self.start_time : self.start_time + self.plot_width
-        ]
+        ].copy()
+        for var in ["roll", "yaw"]:
+            wheel_chunk.loc[wheel_chunk[var].diff().abs() > np.pi, var] = np.nan
+
         self.current_time = self.start_time + self.plot_width * self.zero_pos_frac
 
         current_frame = self.get_movie_frame(self.current_time)
-        self.image_ax.imshow(current_frame)
+        if current_frame is not None:
+            self.image_ax.imshow(current_frame)
 
         for line, ax, var in zip(
             [self.roll_line, self.yaw_line],
             [self.roll_ax, self.yaw_ax],
             ["roll", "yaw"],
         ):
-            line.set_data(wheel_chunk.index - self.current_time, wheel_chunk[var])
+            # line.set_data(wheel_chunk.index - self.current_time, wheel_chunk[var])
+            line.set_data(wheel_chunk.index, wheel_chunk[var])
             ax.set_xlim(self.start_time, self.start_time + self.plot_width)
 
         for line in self.vlines:
@@ -320,3 +355,19 @@ class WheelMovie(MakeMovie):
 
 
 # def load_data_make_movie(data_folder):
+
+
+def despine(ax: plt.Axes, bottom_left: bool = False):
+    """Removes spines (frame)from matplotlib Axes object.
+    By default only removes the right and top spines, and removes
+    all 4 if bottom_left=True
+
+    Args:
+        ax (plt.Axes): Axes object to despine
+        bottom_left (bool, optional): If True, removes all 4 spines. Defaults to False.
+    """
+    sides = ["top", "right"]
+    if bottom_left:
+        sides += ["bottom", "left"]
+    for side in sides:
+        ax.spines[side].set_visible(False)
