@@ -45,7 +45,13 @@ class MakeMovie(object):
     """
 
     def __init__(
-        self, output_path, output_filename, n_chunks=4, n_jobs=4, delete_chunks=True
+        self,
+        output_path,
+        output_filename,
+        n_chunks=4,
+        n_jobs=4,
+        delete_chunks=True,
+        overwrite_chunks=False,
     ):
         self.output_path = Path(output_path)
         if not self.output_path.exists():
@@ -55,6 +61,7 @@ class MakeMovie(object):
         self.n_chunks = n_chunks
         self.n_jobs = n_jobs
         self.delete_chunks = delete_chunks
+        self.overwrite_chunks = overwrite_chunks
 
         # these vars need to be set by Child class
         self.fig = None
@@ -107,6 +114,21 @@ class MakeMovie(object):
         # self.pbar = tqdm(total=len(frames), position=chunk + 1, desc=text)
 
         # should check if self.fig,fps, animate_func and init_func are defined (they are all None by default)
+        if self.fig is None:
+            raise ValueError("self.fig is None, please define self.fig in child class")
+        if self.fps is None:
+            raise ValueError("self.fps is None, please define self.fps in child class")
+        # if self.animate_func is None:
+        #     raise ValueError("self.animate_func is None, please define self.animate_func in child class")
+        # if self.init_func is None:
+        #     raise ValueError("self.init_func is None, please define self.init_func in child class")
+        if not self.overwrite_chunks:
+            if (
+                self.output_path
+                / (self.output_filename + f"_chunk_{chunk + 1:05}" + ".mp4")
+            ).exists():
+                print(f"chunk {chunk + 1:05} already exists, skipping")
+                return
 
         writer = animation.FFMpegWriter(
             fps=self.fps,
@@ -180,6 +202,8 @@ class WheelMovie(MakeMovie):
         zero_pos_frac=0.5,
         show_nth_frame=1,
         pos_ax_size=10,
+        burn_frame_number=True,
+        burn_timestamp=False,
         **kwargs,
     ):
         MakeMovie.__init__(self, output_path, output_filename, **kwargs)
@@ -189,6 +213,8 @@ class WheelMovie(MakeMovie):
         self.zero_pos_frac = zero_pos_frac
         self.fig = plt.figure(constrained_layout=False, figsize=(15, 10), dpi=140)
         self.fps = fps
+        self.burn_frame_number = burn_frame_number
+        self.burn_timestamp = burn_timestamp
 
         # load wheel data
         wheel_df = pd.read_csv(wheel_data_file)
@@ -227,6 +253,8 @@ class WheelMovie(MakeMovie):
         self.start_time = start_time
         if self.start_time is None:
             self.start_time = self.movie_timestamps.index[0]
+
+        self.exp_start_time = self.movie_timestamps.index[0]
         # self.movie_timestamps = movie_timestamps[:::skip_nth_frame]
 
         self.frames = movie_timestamps.index[::show_nth_frame]
@@ -291,6 +319,9 @@ class WheelMovie(MakeMovie):
         # self.fig.suptitle(self.time.strftime("%b %d %H:%M:%S"), size="xx-large")
         # self.animate_func(self.start_time)
 
+        if burn_frame_number or burn_timestamp:
+            self.burned_text = self.fig.text(0.01, 0.98, "", ha="left", va="top")
+
     def animate_func(self, start_time):
         if self.wheel_movie is None:
             self.wheel_movie = cv2.VideoCapture(str(self.movie_file))
@@ -318,7 +349,20 @@ class WheelMovie(MakeMovie):
 
         for line in self.vlines:
             line.set_data(self.current_time, [0, 1])
-
+        burned_text = ""
+        if self.burn_frame_number:
+            idx = self.movie_timestamps.index.get_loc(
+                self.current_time, method="nearest"
+            )
+            burned_text += (
+                f"F: {self.movie_timestamps.iloc[idx].frame_id}"
+                f" / {self.movie_timestamps.iloc[-1].frame_id}\n"
+                f"{(self.current_time - self.exp_start_time).total_seconds():.3f} s\n"
+            )
+        if self.burn_timestamp:
+            burned_text += f"{self.current_time.strftime('%b %d %H:%M:%S')}"
+        if self.burn_frame_number or self.burn_timestamp:
+            self.burned_text.set_text(burned_text)
         # self.fig.suptitle(self.start_time.strftime("%b %d %H:%M:%S"), size="xx-large")
 
         # return (list(self.eye_x_lines.values()) + list(self.eye_pos_points.values()) +
@@ -326,9 +370,8 @@ class WheelMovie(MakeMovie):
         #         [self.forw_line, self.heading_line,
         #         self.traj_pos, self.pos_point, self.pos_heading])
 
-    def get_movie_frame(self, time):
-        frame_i = self.movie_timestamps.index.get_loc(time, method="nearest")
-        idx = self.movie_timestamps.index.get_loc(time, method="nearest")
+    def get_movie_frame(self, current_time):
+        idx = self.movie_timestamps.index.get_loc(current_time, method="nearest")
         frame_id = self.movie_timestamps.iloc[idx].frame_id
         self.wheel_movie.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
         ret, frame = self.wheel_movie.read()
