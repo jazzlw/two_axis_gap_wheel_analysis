@@ -199,6 +199,7 @@ class WheelMovie(MakeMovie):
         fps=30,
         start_time=None,
         total_frames=None,
+        # end_time=None, #broken
         zero_pos_frac=0.5,
         show_nth_frame=1,
         pos_ax_size=10,
@@ -256,8 +257,15 @@ class WheelMovie(MakeMovie):
 
         self.exp_start_time = self.movie_timestamps.index[0]
         # self.movie_timestamps = movie_timestamps[:::skip_nth_frame]
-
-        self.frames = movie_timestamps.index[::show_nth_frame]
+        # if end_time is None:
+        end_time = self.movie_timestamps.index[-1]
+        # print(len(self.movie_timestamps))
+        self.movie_timestamps = self.movie_timestamps.loc[
+            : end_time - (self.plot_width * self.zero_pos_frac)
+        ]
+        # print(len(self.movie_timestamps))
+        self.frames = self.movie_timestamps.index[::show_nth_frame]
+        # print(len(self.frames))
         if total_frames is not None:
             self.frames = self.frames[:total_frames]
 
@@ -306,9 +314,7 @@ class WheelMovie(MakeMovie):
             ["roll", "yaw"],
         ):
             ax.add_line(line)
-            ax.set_xlim(
-                self.start_time, self.start_time + pd.Timedelta(self.plot_width)
-            )
+            ax.set_xlim(0, self.plot_width.total_seconds())
             self.vlines.append(ax.axvline(x=0, **vlinekwargs))
 
             ax.set_ylim(-np.pi, np.pi)
@@ -338,17 +344,22 @@ class WheelMovie(MakeMovie):
         if current_frame is not None:
             self.image_ax.imshow(current_frame)
 
+        x_time = (wheel_chunk.index - self.exp_start_time).total_seconds()
         for line, ax, var in zip(
             [self.roll_line, self.yaw_line],
             [self.roll_ax, self.yaw_ax],
             ["roll", "yaw"],
         ):
             # line.set_data(wheel_chunk.index - self.current_time, wheel_chunk[var])
-            line.set_data(wheel_chunk.index, wheel_chunk[var])
-            ax.set_xlim(self.start_time, self.start_time + self.plot_width)
+
+            line.set_data(x_time, wheel_chunk[var])
+            ax.set_xlim(x_time[0], x_time[-1])
 
         for line in self.vlines:
-            line.set_data(self.current_time, [0, 1])
+            line.set_data(
+                (self.current_time - self.exp_start_time).total_seconds(), [0, 1]
+            )
+
         burned_text = ""
         if self.burn_frame_number:
             idx = self.movie_timestamps.index.get_loc(
