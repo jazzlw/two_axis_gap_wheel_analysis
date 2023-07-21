@@ -4,15 +4,23 @@ import sys
 import time
 from multiprocessing import Pool
 from pathlib import Path
+import psutil
 
 import cv2
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 from matplotlib.lines import Line2D
 from tqdm import tqdm
+
+
+def sizeof_fmt(num, suffix="B"):
+    for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
+        if abs(num) < 1024.0:
+            return f"{num:3.1f} {unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
 
 
 def ax_format_func(value, tick_number):
@@ -112,6 +120,10 @@ class MakeMovie(object):
         # progress bar printed in terminal, not working as expected
         # text = f"chunk { chunk + 1:05}"
         # self.pbar = tqdm(total=len(frames), position=chunk + 1, desc=text)
+        if psutil.virtual_memory().percent > 90:
+            raise MemoryError(
+                f"Memory usage ({psutil.virtual_memory().percent}) too high, exiting"
+            )
 
         # should check if self.fig,fps, animate_func and init_func are defined (they are all None by default)
         if self.fig is None:
@@ -122,13 +134,19 @@ class MakeMovie(object):
         #     raise ValueError("self.animate_func is None, please define self.animate_func in child class")
         # if self.init_func is None:
         #     raise ValueError("self.init_func is None, please define self.init_func in child class")
+        output_file = self.output_path / (
+            self.output_filename + f"_chunk_{chunk + 1:05}" + ".mp4"
+        )
         if not self.overwrite_chunks:
-            if (
-                self.output_path
-                / (self.output_filename + f"_chunk_{chunk + 1:05}" + ".mp4")
-            ).exists():
-                print(f"chunk {chunk + 1:05} already exists, skipping")
-                return
+            if output_file.exists():
+                if output_file.stat().st_size < 1000:
+                    if self.verbose:
+                        print(f"chunk {chunk + 1:05} is empty, deleting")
+                    output_file.unlink()
+                else:
+                    if self.verbose:
+                        print(f"chunk {chunk + 1:05} already exists, skipping")
+                    return
 
         writer = animation.FFMpegWriter(
             fps=self.fps,
@@ -146,10 +164,10 @@ class MakeMovie(object):
         )
 
         ani.save(
-            self.output_path
-            / (self.output_filename + f"_chunk_{chunk + 1:05}" + ".mp4"),
+            output_file,
             writer=writer,
         )
+        # print(f'codeself: {sizeof_fmt(sys.getsizeof(self))}')
         # self.pbar.close()
 
     def stitch_chunks(self):
@@ -205,6 +223,7 @@ class WheelMovie(MakeMovie):
         pos_ax_size=10,
         burn_frame_number=True,
         burn_timestamp=False,
+        verbose=False,
         **kwargs,
     ):
         MakeMovie.__init__(self, output_path, output_filename, **kwargs)
@@ -216,6 +235,7 @@ class WheelMovie(MakeMovie):
         self.fps = fps
         self.burn_frame_number = burn_frame_number
         self.burn_timestamp = burn_timestamp
+        self.verbose = verbose
 
         # load wheel data
         wheel_df = pd.read_csv(wheel_data_file)
@@ -234,7 +254,8 @@ class WheelMovie(MakeMovie):
             .dt.tz_convert("US/Eastern")
         )
         wheel_df.set_index("time", inplace=True)
-        self.wheel_df = wheel_df
+
+        self.wheel_df = wheel_df.sort_index()
 
         # load movie and timestamps
         self.movie_file = movie_file
@@ -250,7 +271,8 @@ class WheelMovie(MakeMovie):
         )
 
         movie_timestamps.set_index("time", inplace=True)
-        self.movie_timestamps = movie_timestamps
+
+        self.movie_timestamps = movie_timestamps.sort_index()
         self.start_time = start_time
         if self.start_time is None:
             self.start_time = self.movie_timestamps.index[0]
@@ -258,11 +280,11 @@ class WheelMovie(MakeMovie):
         self.exp_start_time = self.movie_timestamps.index[0]
         # self.movie_timestamps = movie_timestamps[:::skip_nth_frame]
         # if end_time is None:
-        end_time = self.movie_timestamps.index[-1]
-        # print(len(self.movie_timestamps))
-        self.movie_timestamps = self.movie_timestamps.loc[
-            : end_time - (self.plot_width * self.zero_pos_frac)
-        ]
+        # end_time = self.movie_timestamps.index[-1]
+        # # print(len(self.movie_timestamps))
+        # self.movie_timestamps = self.movie_timestamps.loc[
+        #     : end_time - (self.plot_width * self.zero_pos_frac)
+        # ]
         # print(len(self.movie_timestamps))
         self.frames = self.movie_timestamps.index[::show_nth_frame]
         # print(len(self.frames))
@@ -362,9 +384,14 @@ class WheelMovie(MakeMovie):
 
         burned_text = ""
         if self.burn_frame_number:
-            idx = self.movie_timestamps.index.get_loc(
-                self.current_time, method="nearest"
-            )
+            try:
+                idx = self.movie_timestamps.index.get_indexer(
+                    [self.current_time], method="nearest"
+                )[0]
+            except:
+                if self.verbose:
+                    print(f"failed to get index for timestamp {self.current_time}")
+                return
             burned_text += (
                 f"F: {self.movie_timestamps.iloc[idx].frame_id}"
                 f" / {self.movie_timestamps.iloc[-1].frame_id}\n"
@@ -382,7 +409,14 @@ class WheelMovie(MakeMovie):
         #         self.traj_pos, self.pos_point, self.pos_heading])
 
     def get_movie_frame(self, current_time):
-        idx = self.movie_timestamps.index.get_loc(current_time, method="nearest")
+        try:
+            idx = self.movie_timestamps.index.get_indexer(
+                [current_time], method="nearest"
+            )[0]
+        except:
+            if self.verbose:
+                print(f"failed to get index for timestamp {self.current_time}")
+            return
         frame_id = self.movie_timestamps.iloc[idx].frame_id
         self.wheel_movie.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
         ret, frame = self.wheel_movie.read()
