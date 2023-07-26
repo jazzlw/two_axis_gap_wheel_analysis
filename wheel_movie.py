@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from tqdm import tqdm
+from ffprobe import FFProbe
 
 
 def sizeof_fmt(num, suffix="B"):
@@ -179,6 +180,10 @@ class MakeMovie(object):
         text_file = open("list.txt", "w")
         files_to_stitch = sorted(glob.glob("*chunk*.mp4"))
         for file in files_to_stitch:
+            metadata = FFProbe(file)
+            if not metadata.streams:
+                print(f"file {file} is empty, skipping")
+                continue
             text_file.write("file '" + file + "'\n")
         text_file.close()
         # creates stitched movie
@@ -357,6 +362,8 @@ class WheelMovie(MakeMovie):
         wheel_chunk = self.wheel_df.loc[
             self.start_time : self.start_time + self.plot_width
         ].copy()
+        if len(wheel_chunk) < 2:
+            return
         for var in ["roll", "yaw"]:
             wheel_chunk.loc[wheel_chunk[var].diff().abs() > np.pi, var] = np.nan
 
